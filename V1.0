@@ -1,0 +1,598 @@
+'============================================================
+' Formulario: Shipment Entry (frmShipment code-behind)
+'============================================================
+Option Explicit
+
+' ============================================================
+'  S1 | Configuración (constantes editables)
+' ============================================================
+Private Const SHEET_RECORDS As String = "1_Shipment_nomination_records"
+Private Const RECORDS_TABLE_INDEX As Long = 1
+
+Private Const SHEET_PORTS   As String = "3_Port_of_loading"
+Private Const TABLE_PORTS   As String = "Port_of_loading_table"
+Private Const COL_PORT_NAME As String = "Port of loading"
+Private Const COL_PORT_COUNTRY As String = "Country of origin"
+
+Private Const SHEET_DEST_PORTS   As String = "3_Port_of_loading"
+Private Const TABLE_DEST_PORTS   As String = "Port_of_loading_table"
+Private Const COL_DEST_PORT_NAME As String = "Port of loading"
+Private Const COL_DEST_COUNTRY   As String = "Country of origin"
+
+Private Const SHEET_PRODUCTS   As String = "4_Product"
+Private Const TABLE_PRODUCTS   As String = "Product_table"
+Private Const COL_PRODUCT      As String = "Product"
+Private Const COL_PRODUCT_GRP  As String = "Product group"
+
+Private Const SHEET_SHIPPER_GRP  As String = "5_Shipper_group"
+Private Const TABLE_SHIPPER_GRP  As String = "Shipper_group_table"
+Private Const COL_SHIPPER_GRP    As String = "Supplier_shipper_group"
+
+Private Const SHEET_SHIPPER    As String = "6_Shipper"
+Private Const TABLE_SHIPPER    As String = "Shipper_Table"
+Private Const COL_SHIPPER      As String = "Shipper"
+
+Private Const COL_SHIPMENT_ID      As String = "Shipment_id"
+Private Const COL_BL_NUMBER        As String = "B/L Number"
+Private Const COL_DATE             As String = "Date"
+Private Const COL_TYPE_OF_DATE     As String = "Type of date"
+Private Const COL_VESSEL_NAME      As String = "Vessel name"
+Private Const COL_COUNTRY_ORIG     As String = "Country of origin"
+Private Const COL_PORT_LOADING     As String = "Port of loading"
+Private Const COL_DEST_COUNTRY_TBL As String = "Destination country"
+Private Const COL_DEST_PORT        As String = "Destination port"
+Private Const COL_SHIPPER_GRP_TBL  As String = "Supplier / shipper group"
+Private Const COL_SHIPPER_TBL      As String = "Supplier / shipper"
+Private Const COL_SELLER           As String = "Seller"
+Private Const COL_UML              As String = "UML"
+Private Const COL_BUYER            As String = "Buyer"
+Private Const COL_PRODUCT_GROUP    As String = "Product group"
+Private Const COL_PRODUCT_TBL      As String = "Product"
+Private Const COL_GRADE            As String = "Grade"
+Private Const COL_VOLUME           As String = "Volume (mt)"
+Private Const COL_COMMENTS         As String = "COMMENTS"
+Private Const COL_EXTRA            As String = "Extra"
+Private Const COL_Q                As String = "Q"
+Private Const COL_YEAR             As String = "Año"
+
+' --- NUEVAS COLUMNAS (status) ---
+Private Const COL_DD_STATUS       As String = "Due Diligence status"
+Private Const COL_GERMAN_STATUS   As String = "German Act status"
+Private Const COL_TTP_STATUS      As String = "TTP status"
+Private Const COL_GRIEVANCE_STAT  As String = "Grievance status"
+
+Private Const SHIPMENT_PREFIX As String = "SR_"
+Private Const SHIPMENT_DIGITS As Long = 7
+Private Const SHIPMENT_FIRST  As String = "SR_0001001"
+
+' ===== Seller metadata (AUTOFILL desde UML_Summary_tbl) =====
+' Nombre de la HOJA y de la TABLA:
+Private Const SHEET_SELLER_META  As String = "UML_Summary_tbl"
+Private Const TABLE_SELLER_META  As String = "UML_Summary_tbl"
+' Columnas:
+Private Const COL_META_SELLER    As String = "Mill Name"
+Private Const COL_META_DD        As String = "DD_status"
+Private Const COL_META_GERMAN    As String = "DD_German_act_status"
+Private Const COL_META_TTP       As String = "TTP_Validation_Status"
+Private Const COL_META_GRIEVANCE As String = "Phase Grievance"
+Private Const COL_META_UML       As String = "UML ID"
+
+' ============================================================
+'  S2 | Estado del formulario (variables privadas)
+' ============================================================
+Public isEditMode As Boolean
+Public editRow As Long
+
+Private lastVesselName As String
+Private dictPorts As Object
+Private dictDestPorts As Object
+Private dictProducts As Object
+Private dictShipperGroups As Object
+Private dictShippers As Object
+
+' Cache para autocompletar por Seller
+Private dictSellerMeta As Object   ' key: Seller -> value: Array(DD, German, TTP, Grievance, UML)
+
+' ============================================================
+'  S3 | Utilidades genéricas
+' ============================================================
+Private Function GetListObject(wsName As String, Optional tableName As String = "") As ListObject
+    Dim ws As Worksheet
+    Set ws = ThisWorkbook.Sheets(wsName)
+    If tableName = "" Then
+        Set GetListObject = ws.ListObjects(RECORDS_TABLE_INDEX)
+    Else
+        Set GetListObject = ws.ListObjects(tableName)
+    End If
+End Function
+
+Private Function GetColIndex(lo As ListObject, headerName As String) As Long
+    Dim c As ListColumn
+    For Each c In lo.ListColumns
+        If StrComp(Trim(c.Name), Trim(headerName), vbTextCompare) = 0 Then
+            GetColIndex = c.Index
+            Exit Function
+        End If
+    Next c
+    Err.Raise vbObjectError + 513, , "No existe la columna: " & headerName
+End Function
+
+Private Function ValueInCombo(cmb As MSForms.ComboBox, ByVal strValue As String) As Boolean
+    Dim i As Long
+    For i = 0 To cmb.ListCount - 1
+        If StrComp(Trim(cmb.List(i)), Trim(strValue), vbTextCompare) = 0 Then
+            ValueInCombo = True
+            Exit Function
+        End If
+    Next i
+    ValueInCombo = False
+End Function
+
+Private Sub SafeComboSelectFirst(cmb As MSForms.ComboBox, ByRef cacheLast As String)
+    If Len(cacheLast) > 0 And ValueInCombo(cmb, cacheLast) Then
+        cmb.Value = cacheLast
+    ElseIf cmb.ListCount > 0 Then
+        cmb.ListIndex = 0
+    End If
+End Sub
+
+Private Sub EnsureColumn(lo As ListObject, headerName As String)
+    Dim c As ListColumn
+    For Each c In lo.ListColumns
+        If StrComp(Trim$(c.Name), Trim$(headerName), vbTextCompare) = 0 Then Exit Sub
+    Next
+    Set c = lo.ListColumns.Add
+    c.Name = headerName
+End Sub
+
+Private Sub EnsureStatusColumns(lo As ListObject)
+    EnsureColumn lo, COL_DD_STATUS
+    EnsureColumn lo, COL_GERMAN_STATUS
+    EnsureColumn lo, COL_TTP_STATUS
+    EnsureColumn lo, COL_GRIEVANCE_STAT
+End Sub
+
+' -- Autocompletado por Seller --
+Private Sub ResetSellerStatusFields()
+    txtDueDiligence.Value = ""
+    txtGermanActStatus.Value = ""
+    txtTTP.Value = ""
+    txtGrievance.Value = ""
+    txtUML.Value = ""
+End Sub
+
+Private Sub LoadSellerMeta()
+On Error GoTo ExitSafe
+    Set dictSellerMeta = CreateObject("Scripting.Dictionary")
+    dictSellerMeta.CompareMode = vbTextCompare
+
+    Dim lo As ListObject
+    Set lo = GetListObject(SHEET_SELLER_META, TABLE_SELLER_META)
+
+    Dim i As Long
+    Dim idxSeller As Long, idxDD As Long, idxGerman As Long, idxTTP As Long, idxGrievance As Long, idxUML As Long
+    idxSeller = GetColIndex(lo, COL_META_SELLER)
+    idxDD = GetColIndex(lo, COL_META_DD)
+    idxGerman = GetColIndex(lo, COL_META_GERMAN)
+    idxTTP = GetColIndex(lo, COL_META_TTP)
+    idxGrievance = GetColIndex(lo, COL_META_GRIEVANCE)
+    idxUML = GetColIndex(lo, COL_META_UML)
+
+    For i = 1 To lo.ListRows.Count
+        Dim k As String: k = Trim$(CStr(lo.DataBodyRange(i, idxSeller).Value))
+        If Len(k) > 0 Then
+            If Not dictSellerMeta.Exists(k) Then
+                dictSellerMeta.Add k, Array( _
+                    CStr(lo.DataBodyRange(i, idxDD).Value), _
+                    CStr(lo.DataBodyRange(i, idxGerman).Value), _
+                    CStr(lo.DataBodyRange(i, idxTTP).Value), _
+                    CStr(lo.DataBodyRange(i, idxGrievance).Value), _
+                    CStr(lo.DataBodyRange(i, idxUML).Value))
+            End If
+        End If
+    Next i
+ExitSafe:
+End Sub
+
+Private Sub PoblarSellerCombo()   ' llena cmbSeller con Mill Name (sin duplicados)
+On Error GoTo ExitSafe
+    cmbSeller.Clear
+    If dictSellerMeta Is Nothing Then LoadSellerMeta
+    If dictSellerMeta Is Nothing Then Exit Sub
+
+    Dim keys As Variant, i As Long
+    keys = dictSellerMeta.keys
+    If IsArray(keys) Then
+        ' ordenar alfabéticamente (simple burbuja por brevedad)
+        Dim j As Long, tmp As String
+        For i = LBound(keys) To UBound(keys) - 1
+            For j = i + 1 To UBound(keys)
+                If StrComp(keys(i), keys(j), vbTextCompare) > 0 Then
+                    tmp = keys(i): keys(i) = keys(j): keys(j) = tmp
+                End If
+            Next j
+        Next i
+        For i = LBound(keys) To UBound(keys)
+            cmbSeller.AddItem CStr(keys(i))
+        Next i
+    End If
+ExitSafe:
+End Sub
+
+' ============================================================
+'  S4 | Inicialización / Carga de listas
+' ============================================================
+Private Sub UserForm_Initialize()
+On Error GoTo ErrHandler
+
+    txtDate.Value = Format(Date, "dd/mm/yyyy")
+    With cmbTypeOfDate
+        .Clear
+        .AddItem "B/L"
+        .AddItem "Other"
+    End With
+
+    ' Listas maestras
+    PoblarVesselCombo
+    SafeComboSelectFirst cmbVesselName, lastVesselName
+    PoblarPortsCombo
+    PoblarDestPortsCombo
+    PoblarProductsCombo
+    PoblarShipperGroupCombo
+    PoblarShipperCombo
+
+    ' Seller desde UML_Summary_tbl
+    LoadSellerMeta
+    PoblarSellerCombo
+
+    ' Buyer / Grade (si tienes tablas para esto, cámbialo por poblar desde tabla)
+    cmbBuyer.Clear:  cmbBuyer.AddItem "PASTERNAK": cmbBuyer.AddItem "CARGILL N.V"
+    cmbGrade.Clear:  cmbGrade.AddItem "RSPO SG": cmbGrade.AddItem "NORMAL"
+
+    ResetCamposTexto
+    Exit Sub
+
+ErrHandler:
+    MsgBox "Error al inicializar: " & Err.Description, vbCritical
+End Sub
+
+Private Sub ResetCamposTexto()
+    txtBLNumber.Value = ""
+    txtCountryOrigin.Value = ""
+    txtDestCountry.Value = ""
+    txtProductGroup.Value = ""
+    txtUML.Value = ""
+    txtVolume.Value = ""
+    txtComment.Value = ""
+    txtQuarter.Value = ""
+    txtYear.Value = ""
+    txtDueDiligence.Value = ""
+    txtGermanActStatus.Value = ""
+    txtTTP.Value = ""
+    txtGrievance.Value = ""
+End Sub
+
+' ============================================================
+'  S4b | Poblar listas de combos (resto)
+' ============================================================
+Private Sub PoblarVesselCombo()
+On Error GoTo ErrHandler
+    Dim lo As ListObject, i As Long, vName As String
+    Set lo = GetListObject("2_Vessel_name", "Vessel_name_table")
+    cmbVesselName.Clear
+    For i = 1 To lo.ListRows.Count
+        vName = lo.DataBodyRange(i, GetColIndex(lo, "Vessel_name")).Value
+        If Len(Trim$(vName)) > 0 Then cmbVesselName.AddItem vName
+    Next i
+    Exit Sub
+ErrHandler:
+    MsgBox "Error cargando Vessel: " & Err.Description, vbCritical
+End Sub
+
+Private Sub PoblarPortsCombo()
+On Error GoTo ErrHandler
+    Dim lo As ListObject, i As Long
+    Dim portName As String, countryName As String
+    Set lo = GetListObject(SHEET_PORTS, TABLE_PORTS)
+    Set dictPorts = CreateObject("Scripting.Dictionary")
+    cmbPortLoading.Clear
+    For i = 1 To lo.ListRows.Count
+        portName = lo.DataBodyRange(i, GetColIndex(lo, COL_PORT_NAME)).Value
+        countryName = lo.DataBodyRange(i, GetColIndex(lo, COL_PORT_COUNTRY)).Value
+        If Len(Trim$(portName)) > 0 Then
+            If Not dictPorts.Exists(portName) Then
+                dictPorts.Add portName, countryName
+                cmbPortLoading.AddItem portName
+            End If
+        End If
+    Next i
+    Exit Sub
+ErrHandler:
+    MsgBox "Error cargando puertos de origen: " & Err.Description, vbCritical
+End Sub
+
+Private Sub PoblarDestPortsCombo()
+On Error GoTo ErrHandler
+    Dim lo As ListObject, i As Long
+    Dim portName As String, countryName As String
+    Set lo = GetListObject(SHEET_DEST_PORTS, TABLE_DEST_PORTS)
+    Set dictDestPorts = CreateObject("Scripting.Dictionary")
+    cmbDestPort.Clear
+    For i = 1 To lo.ListRows.Count
+        portName = lo.DataBodyRange(i, GetColIndex(lo, COL_DEST_PORT_NAME)).Value
+        countryName = lo.DataBodyRange(i, GetColIndex(lo, COL_DEST_COUNTRY)).Value
+        If Len(Trim$(portName)) > 0 Then
+            If Not dictDestPorts.Exists(portName) Then
+                dictDestPorts.Add portName, countryName
+                cmbDestPort.AddItem portName
+            End If
+        End If
+    Next i
+    Exit Sub
+ErrHandler:
+    MsgBox "Error cargando puertos de destino: " & Err.Description, vbCritical
+End Sub
+
+Private Sub PoblarProductsCombo()
+On Error GoTo ErrHandler
+    Dim lo As ListObject, i As Long
+    Dim prodName As String, prodGroup As String
+    Set lo = GetListObject(SHEET_PRODUCTS, TABLE_PRODUCTS)
+    Set dictProducts = CreateObject("Scripting.Dictionary")
+    cmbProduct.Clear
+    For i = 1 To lo.ListRows.Count
+        prodName = lo.DataBodyRange(i, GetColIndex(lo, COL_PRODUCT)).Value
+        prodGroup = lo.DataBodyRange(i, GetColIndex(lo, COL_PRODUCT_GRP)).Value
+        If Len(Trim$(prodName)) > 0 Then
+            If Not dictProducts.Exists(prodName) Then
+                dictProducts.Add prodName, prodGroup
+                cmbProduct.AddItem prodName
+            End If
+        End If
+    Next i
+    Exit Sub
+ErrHandler:
+    MsgBox "Error cargando productos: " & Err.Description, vbCritical
+End Sub
+
+Private Sub PoblarShipperGroupCombo()
+On Error GoTo ErrHandler
+    Dim lo As ListObject, i As Long
+    Dim groupName As String
+    Set lo = GetListObject(SHEET_SHIPPER_GRP, TABLE_SHIPPER_GRP)
+    Set dictShipperGroups = CreateObject("Scripting.Dictionary")
+    cmbShipperGroup.Clear
+    For i = 1 To lo.ListRows.Count
+        groupName = lo.DataBodyRange(i, GetColIndex(lo, COL_SHIPPER_GRP)).Value
+        If Len(Trim$(groupName)) > 0 Then
+            If Not dictShipperGroups.Exists(groupName) Then
+                dictShipperGroups.Add groupName, vbNullString
+                cmbShipperGroup.AddItem groupName
+            End If
+        End If
+    Next i
+    Exit Sub
+ErrHandler:
+    MsgBox "Error cargando Shipper Group: " & Err.Description, vbCritical
+End Sub
+
+Private Sub PoblarShipperCombo()
+On Error GoTo ErrHandler
+    Dim lo As ListObject, i As Long
+    Dim shipperName As String
+    Set lo = GetListObject(SHEET_SHIPPER, TABLE_SHIPPER)
+    Set dictShippers = CreateObject("Scripting.Dictionary")
+    cmbShipper.Clear
+    For i = 1 To lo.ListRows.Count
+        shipperName = lo.DataBodyRange(i, GetColIndex(lo, COL_SHIPPER)).Value
+        If Len(Trim$(shipperName)) > 0 Then
+            If Not dictShippers.Exists(shipperName) Then
+                dictShippers.Add shipperName, vbNullString
+                cmbShipper.AddItem shipperName
+            End If
+        End If
+    Next i
+    Exit Sub
+ErrHandler:
+    MsgBox "Error cargando Shipper: " & Err.Description, vbCritical
+End Sub
+
+' ============================================================
+'  S5 | Eventos de cambio
+' ============================================================
+Private Sub cmbVesselName_Change()
+    lastVesselName = cmbVesselName.Value
+End Sub
+
+Private Sub cmbPortLoading_Change()
+    If Not dictPorts Is Nothing Then
+        If dictPorts.Exists(cmbPortLoading.Value) Then
+            txtCountryOrigin.Value = dictPorts(cmbPortLoading.Value)
+        Else
+            txtCountryOrigin.Value = ""
+        End If
+    End If
+End Sub
+
+Private Sub cmbDestPort_Change()
+    If Not dictDestPorts Is Nothing Then
+        If dictDestPorts.Exists(cmbDestPort.Value) Then
+            txtDestCountry.Value = dictDestPorts(cmbDestPort.Value)
+        Else
+            txtDestCountry.Value = ""
+        End If
+    End If
+End Sub
+
+Private Sub cmbProduct_Change()
+    If Not dictProducts Is Nothing Then
+        If dictProducts.Exists(cmbProduct.Value) Then
+            txtProductGroup.Value = dictProducts(cmbProduct.Value)
+        Else
+            txtProductGroup.Value = ""
+        End If
+    End If
+End Sub
+
+Private Sub cmbSeller_Change()
+    ResetSellerStatusFields
+    If dictSellerMeta Is Nothing Then Exit Sub
+    Dim k As String: k = Trim$(CStr(cmbSeller.Value))
+    If Len(k) = 0 Then Exit Sub
+    If Not dictSellerMeta.Exists(k) Then Exit Sub
+
+    Dim v
+    v = dictSellerMeta(k) ' Array(DD, German, TTP, Grievance, UML)
+    On Error Resume Next
+    txtDueDiligence.Value = v(0)
+    txtGermanActStatus.Value = v(1)
+    txtTTP.Value = v(2)
+    txtGrievance.Value = v(3)
+    txtUML.Value = v(4)
+    On Error GoTo 0
+End Sub
+
+' ============================================================
+'  S6 | Validaciones de entrada
+' ============================================================
+Private Function ValidarEntrada() As Boolean
+    ValidarEntrada = False
+    If Len(Trim$(txtBLNumber.Value)) = 0 Then
+        MsgBox "B/L Number is required.", vbExclamation: txtBLNumber.SetFocus: Exit Function
+    End If
+    If Not IsDate(txtDate.Value) Then
+        MsgBox "Date is invalid.", vbExclamation: txtDate.SetFocus: Exit Function
+    End If
+    If Not IsNumeric(txtVolume.Value) Or Val(txtVolume.Value) <= 0 Then
+        MsgBox "Volume must be a positive number.", vbExclamation: txtVolume.SetFocus: Exit Function
+    End If
+    If Not ValueInCombo(cmbVesselName, cmbVesselName.Value) Then
+        MsgBox "Vessel name must be selected from the list.", vbExclamation: cmbVesselName.SetFocus: Exit Function
+    End If
+    If Not ValueInCombo(cmbPortLoading, cmbPortLoading.Value) Then
+        MsgBox "Port of loading must be selected from the list.", vbExclamation: cmbPortLoading.SetFocus: Exit Function
+    End If
+    If Not ValueInCombo(cmbDestPort, cmbDestPort.Value) Then
+        MsgBox "Destination port must be selected from the list.", vbExclamation: cmbDestPort.SetFocus: Exit Function
+    End If
+    If Not ValueInCombo(cmbProduct, cmbProduct.Value) Then
+        MsgBox "Product must be selected from the list.", vbExclamation: cmbProduct.SetFocus: Exit Function
+    End If
+    If Not ValueInCombo(cmbShipperGroup, cmbShipperGroup.Value) Then
+        MsgBox "Supplier / shipper group must be selected from the list.", vbExclamation: cmbShipperGroup.SetFocus: Exit Function
+    End If
+    ' (opcional) validar que Seller esté en la lista
+    If cmbSeller.ListCount > 0 And Not ValueInCombo(cmbSeller, cmbSeller.Value) Then
+        MsgBox "Seller must be selected from the list.", vbExclamation: cmbSeller.SetFocus: Exit Function
+    End If
+    ValidarEntrada = True
+End Function
+
+' ============================================================
+'  S7 | Guardado
+' ============================================================
+Private Sub btnSave_Click()
+On Error GoTo ErrHandler
+    If Not ValidarEntrada Then Exit Sub
+    UpdateQuarterYear
+
+    Dim ws As Worksheet, lo As ListObject
+    Set ws = ThisWorkbook.Sheets(SHEET_RECORDS)
+    Set lo = ws.ListObjects(RECORDS_TABLE_INDEX)
+    EnsureStatusColumns lo
+
+    Dim newRow As ListRow
+    Set newRow = lo.ListRows.Add
+    With newRow
+        .Range(1, GetColIndex(lo, COL_SHIPMENT_ID)).Value = GetNextShipmentID(lo)
+        .Range(1, GetColIndex(lo, COL_BL_NUMBER)).Value = txtBLNumber.Value
+        .Range(1, GetColIndex(lo, COL_DATE)).Value = txtDate.Value
+        .Range(1, GetColIndex(lo, COL_TYPE_OF_DATE)).Value = cmbTypeOfDate.Value
+        .Range(1, GetColIndex(lo, COL_VESSEL_NAME)).Value = cmbVesselName.Value
+        .Range(1, GetColIndex(lo, COL_COUNTRY_ORIG)).Value = txtCountryOrigin.Value
+        .Range(1, GetColIndex(lo, COL_PORT_LOADING)).Value = cmbPortLoading.Value
+        .Range(1, GetColIndex(lo, COL_DEST_COUNTRY_TBL)).Value = txtDestCountry.Value
+        .Range(1, GetColIndex(lo, COL_DEST_PORT)).Value = cmbDestPort.Value
+        .Range(1, GetColIndex(lo, COL_SHIPPER_GRP_TBL)).Value = cmbShipperGroup.Value
+        .Range(1, GetColIndex(lo, COL_SHIPPER_TBL)).Value = cmbShipper.Value
+        .Range(1, GetColIndex(lo, COL_SELLER)).Value = cmbSeller.Value
+        .Range(1, GetColIndex(lo, COL_UML)).Value = txtUML.Value
+        .Range(1, GetColIndex(lo, COL_BUYER)).Value = cmbBuyer.Value
+        .Range(1, GetColIndex(lo, COL_PRODUCT_GROUP)).Value = txtProductGroup.Value
+        .Range(1, GetColIndex(lo, COL_PRODUCT_TBL)).Value = cmbProduct.Value
+        .Range(1, GetColIndex(lo, COL_GRADE)).Value = cmbGrade.Value
+        .Range(1, GetColIndex(lo, COL_VOLUME)).Value = CDbl(txtVolume.Value)
+        .Range(1, GetColIndex(lo, COL_COMMENTS)).Value = txtComment.Value
+        .Range(1, GetColIndex(lo, COL_EXTRA)).Value = vbNullString
+        .Range(1, GetColIndex(lo, COL_Q)).Value = txtQuarter.Value
+        .Range(1, GetColIndex(lo, COL_YEAR)).Value = txtYear.Value
+        .Range(1, GetColIndex(lo, COL_DD_STATUS)).Value = txtDueDiligence.Value
+        .Range(1, GetColIndex(lo, COL_GERMAN_STATUS)).Value = txtGermanActStatus.Value
+        .Range(1, GetColIndex(lo, COL_TTP_STATUS)).Value = txtTTP.Value
+        .Range(1, GetColIndex(lo, COL_GRIEVANCE_STAT)).Value = txtGrievance.Value
+    End With
+
+    Dim lastRowNum As Long, dataRng As Range
+    lastRowNum = lo.ListRows.Count
+    Set dataRng = lo.ListRows(lastRowNum).Range
+    dataRng.Copy
+    If Not lo.DataBodyRange Is Nothing Then
+        lo.DataBodyRange.Rows(1).Insert Shift:=xlDown
+        lo.DataBodyRange.Rows(1).PasteSpecial xlPasteValues
+    Else
+        lo.HeaderRowRange.Offset(1).Resize(1, lo.Range.Columns.Count).PasteSpecial xlPasteValues
+    End If
+    lo.ListRows(lo.ListRows.Count).Delete
+    Application.CutCopyMode = False
+
+    Unload Me
+    Exit Sub
+
+ErrHandler:
+    Application.CutCopyMode = False
+    MsgBox "Error al guardar el registro: " & Err.Description, vbCritical
+End Sub
+
+Private Sub btnCancel_Click()
+    Unload Me
+End Sub
+
+' ============================================================
+'  S8 | Cálculos auxiliares
+' ============================================================
+Private Sub UpdateQuarterYear()
+    If IsDate(txtDate.Value) Then
+        Dim dt As Date
+        dt = DateValue(txtDate.Value)
+        txtQuarter.Value = "Q" & (Int((Month(dt) - 1) / 3) + 1)
+        txtYear.Value = Year(dt)
+    Else
+        txtQuarter.Value = ""
+        txtYear.Value = ""
+    End If
+End Sub
+
+Private Function GetNextShipmentID(lo As ListObject) As String
+    Dim lastID As String, nextNum As Long, i As Long
+    lastID = vbNullString
+    If lo.ListRows.Count > 0 Then
+        For i = lo.ListRows.Count To 1 Step -1
+            lastID = CStr(lo.DataBodyRange(i, GetColIndex(lo, COL_SHIPMENT_ID)).Value)
+            If Len(Trim$(lastID)) > 0 Then Exit For
+        Next i
+    End If
+    If Len(lastID) = 0 Or InStr(1, lastID, SHIPMENT_PREFIX, vbTextCompare) = 0 Then
+        GetNextShipmentID = SHIPMENT_FIRST
+    Else
+        nextNum = CLng(Right$(lastID, SHIPMENT_DIGITS)) + 1
+        GetNextShipmentID = SHIPMENT_PREFIX & Format$(nextNum, String$(SHIPMENT_DIGITS, "0"))
+    End If
+End Function
+
+' ============================================================
+'  S9 | Hooks para edición futura (placeholder)
+' ============================================================
+Public Sub LoadDataFromSheet(ByVal rowNum As Long)
+    ' Aquí podrías implementar la carga para editar un registro existente.
+End Sub
+
