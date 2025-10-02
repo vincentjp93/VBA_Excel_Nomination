@@ -1,0 +1,401 @@
+'============================================================
+' Módulo: ExportarPorBuyerYQ_FullOuterJoin
+'============================================================
+Option Explicit
+
+' ---------- S1_Config ----------
+' VARIABLES SENSIBLES (cámbialas aquí)
+Private Const RUTA_SALIDA As String = "C:\Users\j467408\OneDrive - Cargill Inc\External Folder_FY25\3. Data Sets_Internal\3. Tables_TTP\Export_Tradex\"
+
+Private Const TBL_SHIPMENTS As String = "tblShipments"
+Private Const TBL_TTP       As String = "LATAMCRTTemplateTTPH222024"
+
+Private Const COL_KEY_SHIP  As String = "UML"
+Private Const COL_KEY_TTP   As String = "UML ID [PLEASE USE STANDARDIZED FORMAT]"
+Private Const COL_BUYER     As String = "Buyer"
+Private Const COL_Q         As String = "Q"
+Private Const COL_EXCLUDE_TTP As String = "Validado"
+
+' ========== S2_Util ==========
+' Qué hace:
+'  - Utilidades varias: normaliza claves, obtiene ListObject por nombre,
+'    sanitiza nombres de archivo, vuelca ListObject a arreglo, etc.
+
+Private Function norm_key(ByVal s As Variant) As String
+    If IsError(s) Or IsNull(s) Then
+        norm_key = ""
+    Else
+        norm_key = UCase$(Trim$(CStr(s)))
+    End If
+End Function
+
+Private Function GetListObjectByName(ByVal loName As String) As ListObject
+    Dim ws As Worksheet, lo As ListObject
+    For Each ws In ThisWorkbook.Worksheets
+        For Each lo In ws.ListObjects
+            If StrComp(lo.Name, loName, vbTextCompare) = 0 Then
+                Set GetListObjectByName = lo
+                Exit Function
+            End If
+        Next lo
+    Next ws
+    Err.Raise vbObjectError + 101, "GetListObjectByName", "No se encontró la tabla: " & loName
+End Function
+
+Private Function SanitizeFileName(ByVal s As String) As String
+    Dim badChars As String, i As Long, c As String
+    badChars = "/\:?*""<>|"
+    SanitizeFileName = s
+    For i = 1 To Len(badChars)
+        c = Mid$(badChars, i, 1)
+        SanitizeFileName = Replace(SanitizeFileName, c, "_")
+    Next i
+    ' recorta
+    If Len(SanitizeFileName) > 200 Then SanitizeFileName = Left$(SanitizeFileName, 200)
+    If Len(Trim$(SanitizeFileName)) = 0 Then SanitizeFileName = "SIN_NOMBRE"
+End Function
+
+Private Function ListObjectToArray(ByVal lo As ListObject) As Variant
+    ' Devuelve un arreglo 2D (1-based) con encabezados en fila 1
+    Dim r As Range
+    Set r = lo.Range
+    ListObjectToArray = r.Value
+End Function
+
+Private Function FindColIndex(ByVal headers As Variant, ByVal headerName As String) As Long
+    Dim j As Long
+    For j = LBound(headers, 2) To UBound(headers, 2)
+        If StrComp(CStr(headers(1, j)), headerName, vbTextCompare) = 0 Then
+            FindColIndex = j
+            Exit Function
+        End If
+    Next j
+    FindColIndex = 0
+End Function
+
+Private Function HeadersUnion( _
+    ByVal hdrShip As Variant, ByVal hdrTTP As Variant, _
+    ByVal keyTTP As String, ByVal excludeTTP As String) As Collection
+    ' Devuelve lista de nombres de columna para la salida:
+    '  - todas las de Shipments
+    '  - más las de TTP excepto la clave de TTP y la de "Validado"
+    Dim col As New Collection
+    Dim j As Long, nm As String, exists As Boolean, k As Long
+
+    ' Todas de Ship
+    For j = LBound(hdrShip, 2) To UBound(hdrShip, 2)
+        nm = CStr(hdrShip(1, j))
+        If Len(nm) > 0 Then col.Add nm
+    Next j
+
+    ' De TTP (excepto clave y excluida y duplicados exactos)
+    For j = LBound(hdrTTP, 2) To UBound(hdrTTP, 2)
+        nm = CStr(hdrTTP(1, j))
+        If Len(nm) = 0 Then GoTo nextj
+        If StrComp(nm, keyTTP, vbTextCompare) = 0 Then GoTo nextj
+        If StrComp(nm, excludeTTP, vbTextCompare) = 0 Then GoTo nextj
+        exists = False
+        For k = 1 To col.Count
+            If StrComp(col(k), nm, vbTextCompare) = 0 Then
+                exists = True: Exit For
+            End If
+        Next k
+        If Not exists Then col.Add nm
+nextj:
+    Next j
+
+    Set HeadersUnion = col
+End Function
+
+Private Sub WriteArrayToSheet(ByVal arr As Variant, ByVal ws As Worksheet, Optional ByVal startCell As String = "A1")
+    Dim r As Range
+    Set r = ws.Range(startCell).Resize(UBound(arr, 1), UBound(arr, 2))
+    r.Value = arr
+    ws.Columns.AutoFit
+End Sub
+
+' ========== S3_CargarTablas ==========
+' Qué hace:
+'  - Carga ambas ListObjects a arreglos, verifica columnas clave y campos necesarios.
+
+Private Sub Cargar_Tablas( _
+    ByRef arrShip As Variant, ByRef arrTTP As Variant, _
+    ByRef hdrShip As Variant, ByRef hdrTTP As Variant, _
+    ByRef idxKeyShip As Long, ByRef idxKeyTTP As Long, _
+    ByRef idxBuyer As Long, ByRef idxQ As Long)
+
+    Dim loShip As ListObject, loTTP As ListObject
+    Dim i As Long, j As Long
+
+    Set loShip = GetListObjectByName(TBL_SHIPMENTS)
+    Set loTTP = GetListObjectByName(TBL_TTP)
+
+    arrShip = ListObjectToArray(loShip)
+    arrTTP = ListObjectToArray(loTTP)
+
+    hdrShip = arrShip
+    hdrTTP = arrTTP
+
+    idxKeyShip = FindColIndex(hdrShip, COL_KEY_SHIP)
+    idxBuyer = FindColIndex(hdrShip, COL_BUYER)
+    idxQ = FindColIndex(hdrShip, COL_Q)
+    idxKeyTTP = FindColIndex(hdrTTP, COL_KEY_TTP)
+
+    If idxKeyShip = 0 Then Err.Raise vbObjectError + 201, , "No se encontró columna '" & COL_KEY_SHIP & "' en " & TBL_SHIPMENTS
+    If idxBuyer = 0 Then Err.Raise vbObjectError + 202, , "No se encontró columna '" & COL_BUYER & "' en " & TBL_SHIPMENTS
+    If idxQ = 0 Then Err.Raise vbObjectError + 203, , "No se encontró columna '" & COL_Q & "' en " & TBL_SHIPMENTS
+    If idxKeyTTP = 0 Then Err.Raise vbObjectError + 204, , "No se encontró columna '" & COL_KEY_TTP & "' en " & TBL_TTP
+End Sub
+
+' ========== S4_CombinarFullOuter ==========
+Private Function Combinar_FullOuter( _
+    ByVal arrShip As Variant, ByVal arrTTP As Variant, _
+    ByVal hdrShip As Variant, ByVal hdrTTP As Variant, _
+    ByVal idxKeyShip As Long, ByVal idxKeyTTP As Long) As Variant
+
+    Dim dic As Object: Set dic = CreateObject("Scripting.Dictionary")
+    Dim i As Long, j As Long, key As String
+    Dim headersOut As Collection, outArr() As Variant
+
+    ' Mapa de salida de columnas
+    Set headersOut = HeadersUnion(hdrShip, hdrTTP, COL_KEY_TTP, COL_EXCLUDE_TTP)
+
+    ' 1) Cargar Shipments
+    For i = 2 To UBound(arrShip, 1)
+        key = norm_key(arrShip(i, idxKeyShip))
+        If Not dic.exists(key) Then
+            dic.Add key, Array(i, 0) ' (fila Ship, fila TTP)
+        End If
+    Next i
+
+    ' 2) Mezclar con TTP
+    For i = 2 To UBound(arrTTP, 1)
+        key = norm_key(arrTTP(i, idxKeyTTP))
+        If dic.exists(key) Then
+            Dim pair As Variant
+            pair = dic(key)
+            pair(1) = i
+            dic(key) = pair
+        Else
+            dic.Add key, Array(0, i)
+        End If
+    Next i
+
+    ' 3) Construir arreglo de salida
+    Dim nRows As Long, nCols As Long
+    nRows = dic.Count + 1
+    nCols = headersOut.Count
+    ReDim outArr(1 To nRows, 1 To nCols)
+
+    ' Encabezados
+    For j = 1 To nCols
+        outArr(1, j) = headersOut(j)
+    Next j
+
+    ' Diccionarios de índice por nombre de columna
+    Dim idxMapShip As Object: Set idxMapShip = CreateObject("Scripting.Dictionary")
+    Dim idxMapTTP  As Object: Set idxMapTTP = CreateObject("Scripting.Dictionary")
+
+    For j = LBound(hdrShip, 2) To UBound(hdrShip, 2)
+        idxMapShip(CStr(hdrShip(1, j))) = j
+    Next j
+    For j = LBound(hdrTTP, 2) To UBound(hdrTTP, 2)
+        idxMapTTP(CStr(hdrTTP(1, j))) = j
+    Next j
+
+    ' Llenado
+    Dim r As Long: r = 2
+    Dim it As Variant, rowS As Long, rowT As Long, colName As String, srcIdx As Long
+
+    For Each it In dic.Items
+        rowS = it(0): rowT = it(1)
+
+        For j = 1 To nCols
+            colName = CStr(headersOut(j))
+            If idxMapShip.exists(colName) And rowS > 0 Then
+                srcIdx = CLng(idxMapShip(colName))
+                outArr(r, j) = arrShip(rowS, srcIdx)
+            ElseIf idxMapTTP.exists(colName) And rowT > 0 Then
+                srcIdx = CLng(idxMapTTP(colName))
+                outArr(r, j) = arrTTP(rowT, srcIdx)
+            Else
+                outArr(r, j) = Empty
+            End If
+        Next j
+
+        r = r + 1
+    Next it
+
+    Combinar_FullOuter = outArr
+End Function
+
+
+' ========== S5_IndicesYCatalogos ==========
+' Qué hace:
+'  - Localiza índices de Buyer y Q en el arreglo combinado.
+'  - Genera listas únicas de Buyer y Q (por Buyer).
+
+Private Sub ObtenerIndicesYCatalogos( _
+    ByVal arrOut As Variant, _
+    ByRef idxBuyerOut As Long, ByRef idxQOut As Long, _
+    ByRef dicBuyers As Object)
+    Dim j As Long, i As Long, buyer As String
+
+    idxBuyerOut = FindColIndex(arrOut, COL_BUYER)
+    idxQOut = FindColIndex(arrOut, COL_Q)
+
+    If idxBuyerOut = 0 Then Err.Raise vbObjectError + 301, , "No se encontró columna Buyer en la salida."
+    If idxQOut = 0 Then Err.Raise vbObjectError + 302, , "No se encontró columna Q en la salida."
+
+    Set dicBuyers = CreateObject("Scripting.Dictionary")
+    For i = 2 To UBound(arrOut, 1)
+        buyer = Trim$(CStr(arrOut(i, idxBuyerOut)))
+        If Len(buyer) > 0 Then
+            If Not dicBuyers.exists(buyer) Then dicBuyers.Add buyer, CreateObject("Scripting.Dictionary")
+            ' agrega Q a su catálogo
+            Dim qv As String
+            qv = Trim$(CStr(arrOut(i, idxQOut)))
+            If Len(qv) > 0 Then
+                If Not dicBuyers(buyer).exists(qv) Then dicBuyers(buyer).Add qv, True
+            End If
+        End If
+    Next i
+End Sub
+
+' ========== S6_ExportarBuyerQ ==========
+' Qué hace:
+'  - Para cada Buyer y cada Q de ese Buyer, filtra el arreglo combinado
+'    y exporta un .xlsx en RUTA_SALIDA.
+'  - Excluye automáticamente filas sin Buyer o sin Q para ese archivo.
+
+Private Sub Exportar_Por_Buyer_Y_Q( _
+    ByVal arrOut As Variant, _
+    ByVal idxBuyerOut As Long, ByVal idxQOut As Long, _
+    ByVal dicBuyers As Object)
+
+    Dim buyer As Variant, q As Variant
+    Dim i As Long, j As Long, countRows As Long
+    Dim wb As Workbook, ws As Worksheet
+    Dim fileName As String, fullPath As String
+
+    ' Verifica carpeta
+    If Right$(RUTA_SALIDA, 1) <> "\" Then
+        Err.Raise vbObjectError + 401, , "RUTA_SALIDA debe terminar con '\'. Valor actual: " & RUTA_SALIDA
+    End If
+
+    For Each buyer In dicBuyers.keys
+        For Each q In dicBuyers(buyer).keys
+            ' contar filas que aplican
+            countRows = 1 ' header
+            For i = 2 To UBound(arrOut, 1)
+                If StrComp(Trim$(CStr(arrOut(i, idxBuyerOut))), CStr(buyer), vbTextCompare) = 0 _
+                And StrComp(Trim$(CStr(arrOut(i, idxQOut))), CStr(q), vbTextCompare) = 0 Then
+                    countRows = countRows + 1
+                End If
+            Next i
+
+            If countRows > 1 Then
+                ' construir mini-arreglo
+                Dim subArr() As Variant
+                ReDim subArr(1 To countRows, 1 To UBound(arrOut, 2))
+                ' headers
+                For j = 1 To UBound(arrOut, 2)
+                    subArr(1, j) = arrOut(1, j)
+                Next j
+                ' filas
+                Dim r As Long: r = 2
+                For i = 2 To UBound(arrOut, 1)
+                    If StrComp(Trim$(CStr(arrOut(i, idxBuyerOut))), CStr(buyer), vbTextCompare) = 0 _
+                    And StrComp(Trim$(CStr(arrOut(i, idxQOut))), CStr(q), vbTextCompare) = 0 Then
+                        For j = 1 To UBound(arrOut, 2)
+                            subArr(r, j) = arrOut(i, j)
+                        Next j
+                        r = r + 1
+                    End If
+                Next i
+
+                ' exportar
+                Set wb = Application.Workbooks.Add(xlWBATWorksheet)
+                Set ws = wb.Worksheets(1)
+                ws.Name = "Data"
+
+                WriteArrayToSheet subArr, ws, "A1"
+
+                fileName = "Buyer_" & SanitizeFileName(CStr(buyer)) & "_Q" & SanitizeFileName(CStr(q)) & ".xlsx"
+                fullPath = RUTA_SALIDA & fileName
+                Application.DisplayAlerts = False
+                wb.SaveAs fileName:=fullPath, FileFormat:=xlOpenXMLWorkbook ' .xlsx
+                wb.Close SaveChanges:=False
+                Application.DisplayAlerts = True
+            End If
+        Next q
+    Next buyer
+End Sub
+
+' ========== S7_MacroPrincipal ==========
+' Qué hace:
+'  - Orquesta el flujo: carga, combina, cataloga y exporta.
+
+Public Sub Run_ExportarPorBuyerYQ()
+    On Error GoTo ERRH
+    Dim t0 As Double: t0 = Timer
+
+    Dim arrShip As Variant, arrTTP As Variant, hdrShip As Variant, hdrTTP As Variant
+    Dim idxKeyShip As Long, idxKeyTTP As Long, idxBuyer As Long, idxQ As Long
+    Dim arrOut As Variant, idxBuyerOut As Long, idxQOut As Long
+    Dim dicBuyers As Object
+
+    With Application
+        .ScreenUpdating = False
+        .EnableEvents = False
+        .Calculation = xlCalculationManual
+        .DisplayStatusBar = True
+        .StatusBar = "Combinando datos y preparando exportaciones..."
+    End With
+
+    Cargar_Tablas arrShip, arrTTP, hdrShip, hdrTTP, idxKeyShip, idxKeyTTP, idxBuyer, idxQ
+    arrOut = Combinar_FullOuter(arrShip, arrTTP, hdrShip, hdrTTP, idxKeyShip, idxKeyTTP)
+
+    ObtenerIndicesYCatalogos arrOut, idxBuyerOut, idxQOut, dicBuyers
+    Exportar_Por_Buyer_Y_Q arrOut, idxBuyerOut, idxQOut, dicBuyers
+
+    With Application
+        .StatusBar = False
+        .Calculation = xlCalculationAutomatic
+        .EnableEvents = True
+        .ScreenUpdating = True
+    End With
+
+    MsgBox "Listo. Exportación por Buyer y Q terminada en " & Format(Timer - t0, "0.0") & " s.", vbInformation
+    Exit Sub
+
+ERRH:
+    With Application
+        .StatusBar = False
+        .Calculation = xlCalculationAutomatic
+        .EnableEvents = True
+        .ScreenUpdating = True
+    End With
+    MsgBox "Error: " & Err.Description, vbCritical
+End Sub
+
+' ========== S8_PruebasMinimas ==========
+' Smoke test:
+'  - Asegura que existen las tablas con los nombres exactos.
+'  - Asegura que las columnas 'UML', 'Buyer', 'Q' y 'UML ID [PLEASE USE STANDARDIZED FORMAT]' existen.
+'  - Ejecuta Run_ExportarPorBuyerYQ y revisa que se creen archivos .xlsx en RUTA_SALIDA.
+'
+' Caso borde:
+'  - UML presente solo en TTP (sin match en Shipments) y viceversa.
+'  - Buyer con Qs distintos (Q1, Q2, etc.) genera múltiples archivos.
+'  - Filas con Buyer vacío no generan archivo (no hay Buyer).
+
+' ========== S9_ErroresYLogs ==========
+' Validaciones:
+'  - Falla explícita si no encuentra las tablas/columnas clave.
+'  - Falla si RUTA_SALIDA no termina en "\".
+' Logs:
+'  - StatusBar con progreso simple.
+'============================================================
+
+
